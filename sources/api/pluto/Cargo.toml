@@ -12,6 +12,7 @@ exclude = ["README.md"]
 [dependencies]
 apiclient = { path = "../apiclient", version = "0.1" }
 constants = { path = "../../constants", version = "0.1" }
+clap = { version = "4.2",  features = ["derive"] }
 hyper = "0.14"
 hyper-proxy = {  version = "0.9", default-features = false, features = ["rustls"] }
 hyper-rustls = { version = "0.23", default-features = false, features = ["http2", "native-tokio", "tls12", "logging"] }

@@ -36,14 +36,15 @@ mod ec2;
 mod eks;
 mod proxy;
 
+use clap::{Args, Parser, Subcommand};
 use imdsclient::ImdsClient;
 use snafu::{ensure, OptionExt, ResultExt};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::net::IpAddr;
+use std::process;
 use std::str::FromStr;
 use std::string::String;
-use std::{env, process};
 
 // This is the default DNS unless our CIDR block begins with "10."
 const DEFAULT_DNS_CLUSTER_IP: &str = "10.100.0.10";
@@ -139,7 +140,7 @@ use error::PlutoError;
 
 type Result<T> = std::result::Result<T, PlutoError>;
 
-async fn get_max_pods(client: &mut ImdsClient) -> Result<String> {
+async fn get_max_pods(client: &mut ImdsClient, args: MaxPodsArgs) -> Result<String> {
     let instance_type = client
         .fetch_instance_type()
         .await
@@ -162,6 +163,18 @@ async fn get_max_pods(client: &mut ImdsClient) -> Result<String> {
         }
         let tokens: Vec<_> = line.split_whitespace().collect();
         if tokens.len() == 2 && tokens[0] == instance_type {
+            if let Some(offset) = args.offset {
+                let max_pods = tokens[1].parse::<i32>().context(error::ParseToU32Snafu {
+                    setting: "max-pods",
+                })?;
+                let max_pods = max_pods + offset;
+                ensure!(
+                    max_pods > 0,
+                    error::NoInstanceTypeMaxPodsSnafu { instance_type }
+                );
+                return Ok(max_pods.to_string());
+            }
+
             return Ok(tokens[1].to_string());
         }
     }
@@ -330,54 +343,68 @@ async fn get_private_dns_name(client: &mut ImdsClient) -> Result<String> {
         .context(error::Ec2Snafu)
 }
 
-/// Print usage message.
-fn usage() -> ! {
-    let program_name = env::args().next().unwrap_or_else(|| "program".to_string());
-    eprintln!(
-        r"Usage: {} [max-pods | cluster-dns-ip | node-ip | provider-id | private-dns-name]",
-        program_name
-    );
-    process::exit(1);
+#[derive(Parser, Debug)]
+#[command(name = "pluto")]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
 }
 
-/// Parses args for the setting key name.
-fn parse_args(mut args: env::Args) -> String {
-    args.nth(1).unwrap_or_else(|| usage())
+#[derive(Debug, Subcommand)]
+enum Commands {
+    MaxPods(MaxPodsArgs),
+    ClusterDnsIp,
+    NodeIp,
+    ProviderIp,
+    PrivateDnsName,
+}
+
+#[derive(Debug, Args, Copy, Clone)]
+struct MaxPodsArgs {
+    /// An offset to apply to the max pods value. Use a positive value to increase the max pods and
+    /// a negative to decrease the max pods over what is normal for the instance type. This is
+    /// useful for example when you have an CNI that reserves IPs on the instance and need to
+    /// account for that in the MaxPods value.
+    #[arg(short, long)]
+    offset: Option<i32>,
 }
 
 async fn run() -> Result<()> {
-    let setting_name = parse_args(env::args());
+    // let setting_name = parse_args(env::args());
+    let args = Cli::parse();
     let mut client = ImdsClient::new();
 
-    let setting = match setting_name.as_ref() {
-        "cluster-dns-ip" => get_cluster_dns_ip(&mut client).await,
-        "node-ip" => get_node_ip(&mut client).await,
+    let setting = match args.command {
+        Commands::ClusterDnsIp => get_cluster_dns_ip(&mut client).await,
+        Commands::NodeIp => get_node_ip(&mut client).await,
         // If we want to specify a reasonable default in a template, we can exit 2 to tell
         // sundog to skip this setting.
-        "max-pods" => get_max_pods(&mut client)
+        Commands::MaxPods(args) => get_max_pods(&mut client, args)
             .await
             .map_err(|_| process::exit(2)),
-        "provider-id" => get_provider_id(&mut client).await,
-        "private-dns-name" => get_private_dns_name(&mut client).await,
-        _ => usage(),
+        Commands::ProviderIp => get_provider_id(&mut client).await,
+        Commands::PrivateDnsName => get_private_dns_name(&mut client).await,
     }?;
 
     // sundog expects JSON-serialized output so that many types can be represented, allowing the
     // API model to use more accurate types.
 
     // 'max_pods' setting is an unsigned integer, convert 'settings' to u32 before serializing to JSON
-    if setting_name == "max-pods" {
-        let max_pods = serde_json::to_string(
-            &setting
-                .parse::<u32>()
-                .context(error::ParseToU32Snafu { setting: &setting })?,
-        )
-        .context(error::OutputJsonSnafu { output: &setting })?;
-        println!("{}", max_pods);
-    } else {
-        let output =
-            serde_json::to_string(&setting).context(error::OutputJsonSnafu { output: &setting })?;
-        println!("{}", output);
+    match args.command {
+        Commands::MaxPods(_) => {
+            let max_pods = serde_json::to_string(
+                &setting
+                    .parse::<u32>()
+                    .context(error::ParseToU32Snafu { setting: &setting })?,
+            )
+            .context(error::OutputJsonSnafu { output: &setting })?;
+            println!("{}", max_pods);
+        }
+        _ => {
+            let output = serde_json::to_string(&setting)
+                .context(error::OutputJsonSnafu { output: &setting })?;
+            println!("{}", output);
+        }
     }
     Ok(())
 }
