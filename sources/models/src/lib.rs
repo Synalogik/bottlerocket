@@ -277,6 +277,10 @@ struct KubernetesSettings {
     pod_infra_container_image: SingleLineString,
     // Generated in `aws-k8s-1.26*` variants only
     hostname_override: ValidLinuxHostname,
+
+    // Settings that provide commands to Pluto to run to modify automatically detected settings
+    #[serde(default)]
+    max_pods_offset: Option<i32>,
 }
 
 // ECS settings.
