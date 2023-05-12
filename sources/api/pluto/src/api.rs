@@ -1,4 +1,7 @@
-pub(super) use inner::{get_aws_k8s_info, Error};
+use super::*;
+use snafu::{ResultExt, Snafu};
+
+pub(super) use inner::get_aws_k8s_info;
 
 /// The result type for the [`api`] module.
 pub(super) type Result<T> = std::result::Result<T, Error>;
@@ -9,36 +12,34 @@ pub(crate) struct AwsK8sInfo {
     pub(crate) cluster_dns_ip: Option<model::modeled_types::KubernetesClusterDnsIp>,
 }
 
+#[derive(Debug, Snafu)]
+pub(crate) enum Error {
+    #[snafu(display("Error calling Bottlerocket API: {}", source))]
+    ApiClient {
+        #[snafu(source(from(apiclient::Error, Box::new)))]
+        source: Box<apiclient::Error>,
+        uri: String,
+    },
+
+    #[snafu(display("Unable to deserialize Bottlerocket settings: {}", source))]
+    SettingsJson { source: serde_json::Error },
+}
+
+/// Gets the Bottlerocket settings from the API and deserializes them into a struct.
+pub(crate) async fn get_settings() -> Result<model::Settings> {
+    let uri = constants::API_SETTINGS_URI;
+    let (_status, response_body) = apiclient::raw_request(constants::API_SOCKET, uri, "GET", None)
+        .await
+        .context(ApiClientSnafu { uri })?;
+
+    serde_json::from_str(&response_body).context(SettingsJsonSnafu)
+}
+
 /// This code is the 'actual' implementation compiled when the `sources` workspace is being compiled
 /// for `aws-k8s-*` variants.
 #[cfg(variant_family = "aws-k8s")]
 mod inner {
     use super::*;
-    use snafu::{ResultExt, Snafu};
-
-    #[derive(Debug, Snafu)]
-    pub(crate) enum Error {
-        #[snafu(display("Error calling Bottlerocket API: {}", source))]
-        ApiClient {
-            #[snafu(source(from(apiclient::Error, Box::new)))]
-            source: Box<apiclient::Error>,
-            uri: String,
-        },
-
-        #[snafu(display("Unable to deserialize Bottlerocket settings: {}", source))]
-        SettingsJson { source: serde_json::Error },
-    }
-
-    /// Gets the Bottlerocket settings from the API and deserializes them into a struct.
-    async fn get_settings() -> Result<model::Settings> {
-        let uri = constants::API_SETTINGS_URI;
-        let (_status, response_body) =
-            apiclient::raw_request(constants::API_SOCKET, uri, "GET", None)
-                .await
-                .context(ApiClientSnafu { uri })?;
-
-        serde_json::from_str(&response_body).context(SettingsJsonSnafu)
-    }
 
     /// Gets the info that we need to know about the EKS cluster from the Bottlerocket API.
     pub(crate) async fn get_aws_k8s_info() -> Result<AwsK8sInfo> {

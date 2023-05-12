@@ -37,6 +37,7 @@ mod ec2;
 mod eks;
 mod proxy;
 
+use api::get_settings;
 use imdsclient::ImdsClient;
 use snafu::{ensure, OptionExt, ResultExt};
 use std::fs::File;
@@ -133,6 +134,9 @@ mod error {
             instance_type
         ))]
         NoInstanceTypeMaxPods { instance_type: String },
+
+        #[snafu(display("Failed to lookup Max Pods Offset from API: {}", source))]
+        MaxPodsOffset { source: api::Error },
     }
 }
 
@@ -141,6 +145,19 @@ use error::PlutoError;
 type Result<T> = std::result::Result<T, PlutoError>;
 
 async fn get_max_pods(client: &mut ImdsClient) -> Result<String> {
+    let max_pods_offset = if let Some(kubernetes) = get_settings()
+        .await
+        .context(error::MaxPodsOffsetSnafu)?
+        .kubernetes
+    {
+        if let Some(max_pods_offset) = kubernetes.max_pods_offset {
+            max_pods_offset
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     let instance_type = client
         .fetch_instance_type()
         .await
@@ -155,6 +172,7 @@ async fn get_max_pods(client: &mut ImdsClient) -> Result<String> {
             path: ENI_MAX_PODS_PATH,
         },
     )?);
+
     for line in file.lines() {
         let line = line.context(error::IoReadLineSnafu)?;
         // Skip the comments in the file
@@ -163,6 +181,18 @@ async fn get_max_pods(client: &mut ImdsClient) -> Result<String> {
         }
         let tokens: Vec<_> = line.split_whitespace().collect();
         if tokens.len() == 2 && tokens[0] == instance_type {
+            if let Some(offset) = max_pods_offset {
+                let max_pods = tokens[1].parse::<i32>().context(error::ParseToU32Snafu {
+                    setting: "max-pods",
+                })?;
+                let max_pods = max_pods + offset;
+                ensure!(
+                    max_pods > 0,
+                    error::NoInstanceTypeMaxPodsSnafu { instance_type }
+                );
+                return Ok(max_pods.to_string());
+            }
+
             return Ok(tokens[1].to_string());
         }
     }
