@@ -36,6 +36,7 @@ mod ec2;
 mod eks;
 mod proxy;
 
+use api::get_settings;
 use clap::{Args, Parser, Subcommand};
 use imdsclient::ImdsClient;
 use snafu::{ensure, OptionExt, ResultExt};
@@ -133,6 +134,9 @@ mod error {
             instance_type
         ))]
         NoInstanceTypeMaxPods { instance_type: String },
+
+        #[snafu(display("Failed to lookup Max Pods Offset from API: {}", source))]
+        MaxPodsOffset { source: api::Error },
     }
 }
 
@@ -140,7 +144,20 @@ use error::PlutoError;
 
 type Result<T> = std::result::Result<T, PlutoError>;
 
-async fn get_max_pods(client: &mut ImdsClient, args: MaxPodsArgs) -> Result<String> {
+async fn get_max_pods(client: &mut ImdsClient) -> Result<String> {
+    let max_pods_offset = if let Some(kubernetes) = get_settings()
+        .await
+        .context(error::MaxPodsOffsetSnafu)?
+        .kubernetes
+    {
+        if let Some(max_pods_offset) = kubernetes.max_pods_offset {
+            max_pods_offset
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     let instance_type = client
         .fetch_instance_type()
         .await
@@ -155,6 +172,7 @@ async fn get_max_pods(client: &mut ImdsClient, args: MaxPodsArgs) -> Result<Stri
             path: ENI_MAX_PODS_PATH,
         },
     )?);
+
     for line in file.lines() {
         let line = line.context(error::IoReadLineSnafu)?;
         // Skip the comments in the file
@@ -163,7 +181,7 @@ async fn get_max_pods(client: &mut ImdsClient, args: MaxPodsArgs) -> Result<Stri
         }
         let tokens: Vec<_> = line.split_whitespace().collect();
         if tokens.len() == 2 && tokens[0] == instance_type {
-            if let Some(offset) = args.offset {
+            if let Some(offset) = max_pods_offset {
                 let max_pods = tokens[1].parse::<i32>().context(error::ParseToU32Snafu {
                     setting: "max-pods",
                 })?;
@@ -352,7 +370,7 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
-    MaxPods(MaxPodsArgs),
+    MaxPods,
     ClusterDnsIp,
     NodeIp,
     ProviderIp,
@@ -379,7 +397,7 @@ async fn run() -> Result<()> {
         Commands::NodeIp => get_node_ip(&mut client).await,
         // If we want to specify a reasonable default in a template, we can exit 2 to tell
         // sundog to skip this setting.
-        Commands::MaxPods(args) => get_max_pods(&mut client, args)
+        Commands::MaxPods => get_max_pods(&mut client)
             .await
             .map_err(|_| process::exit(2)),
         Commands::ProviderIp => get_provider_id(&mut client).await,
@@ -391,7 +409,7 @@ async fn run() -> Result<()> {
 
     // 'max_pods' setting is an unsigned integer, convert 'settings' to u32 before serializing to JSON
     match args.command {
-        Commands::MaxPods(_) => {
+        Commands::MaxPods => {
             let max_pods = serde_json::to_string(
                 &setting
                     .parse::<u32>()
