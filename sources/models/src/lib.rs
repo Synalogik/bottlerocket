@@ -312,6 +312,10 @@ struct KubernetesSettings {
     hostname_override: ValidLinuxHostname,
     // Generated in `k8s-1.25+` variants only
     seccomp_default: bool,
+
+    // Settings that provide commands to Pluto to run to modify automatically detected settings
+    #[serde(default)]
+    max_pods_offset: Option<i32>,
 }
 
 // ECS settings.
